@@ -6,16 +6,14 @@ use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
 
-use std::sync::Arc;
 use websocket::header::Headers;
 use websocket::result::WebSocketError;
 use websocket::{ClientBuilder, OwnedMessage};
 
-//use futures::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 
-pub type TxCallback = Arc<FnMut(&mut Vec<u8>, &mut bool) + Send + Sync + 'static>;
-pub type RxCallback = Arc<FnMut(&str, &bool) + Send + Sync + 'static>;
+pub type TxCallback = Box<FnMut(&mut Vec<u8>, &mut bool) + Send + Sync + 'static>;
+pub type RxCallback = Box<FnMut(&str, &bool) + Send + Sync + 'static>;
 
 pub struct MimiIO {
     tx_thread: JoinHandle<u32>,
@@ -44,7 +42,6 @@ impl MimiIO {
             'txloop: loop {
                 let mut buffer = Vec::new();
                 tx_func(&mut buffer, &mut recog_break);
-                //let buffer = (tx_func)();
 
                 match recog_break {
                     false => {

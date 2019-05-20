@@ -1,11 +1,9 @@
 extern crate rust_mimiio;
 use clap::{App, Arg};
 use rust_mimiio::MimiIO;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
-use std::sync::Arc;
 
 const CHUNK_SIZE: usize = 8192;
 
@@ -58,7 +56,7 @@ fn run() -> Result<(), String> {
         "service.mimi.fd.ai",
         443,
         &headers,
-        Arc::new(move |send_buf: &mut Vec<u8>, recog_break: &mut bool| {
+        &mut Box::new(move |send_buf: &mut Vec<u8>, recog_break: &mut bool| {
             let size = f.read(&mut buf).unwrap();
             match size {
                 0 => *recog_break = true,
@@ -69,7 +67,7 @@ fn run() -> Result<(), String> {
                 }
             }
         }),
-        &mut Arc::new(move |recv_str, _finished| {
+        &mut Box::new(move |recv_str, _finished| {
             println!("{}", recv_str);
         }),
     )?;
