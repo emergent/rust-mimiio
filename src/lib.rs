@@ -12,49 +12,54 @@ use websocket::{ClientBuilder, OwnedMessage};
 
 use std::thread::JoinHandle;
 
-pub type TxCallback = Box<FnMut(&mut Vec<u8>, &mut bool) + Send + Sync + 'static>;
-pub type RxCallback = Box<FnMut(&str, &bool) + Send + Sync + 'static>;
-
 pub struct MimiIO {
     tx_thread: JoinHandle<u32>,
     rx_thread: JoinHandle<u32>,
 }
 
 impl MimiIO {
-    pub fn open(
+    pub fn open<TXCB, RXCB>(
         host: &str,
         port: i32,
         request_headers: &HashMap<&str, &str>,
-        tx_func: &'static mut TxCallback,
-        rx_func: &'static mut RxCallback,
-    ) -> Result<Self, String> {
+        tx_func0: TXCB,
+        rx_func0: RXCB,
+    ) -> Result<Self, String>
+    where
+        TXCB: FnMut(&mut Vec<u8>, &mut bool) + Send + Sync + 'static,
+        RXCB: FnMut(&str, bool) + Send + Sync + 'static,
+    {
         let headers = Self::make_headers(request_headers);
         let url = format!("wss://{}:{}", host, port);
+
+        let mut tx_func = Box::new(tx_func0);
+        let mut rx_func = Box::new(rx_func0);
 
         let (tx_sender, tx_receiver) = mpsc::channel(0);
 
         let tx_thread = thread::spawn(move || {
             let mut tx_sink = tx_sender.wait();
-            let mut total = 0;
             let mut recog_break = false;
+            let mut total = 0;
 
-            thread::sleep(Duration::from_millis(100));
             'txloop: loop {
                 let mut buffer = Vec::new();
                 tx_func(&mut buffer, &mut recog_break);
+                //let mut buffer = tx_func();
+                //let size = buffer.len();
 
                 match recog_break {
-                    false => {
-                        let size = buffer.len();
-                        tx_sink.send(OwnedMessage::Binary(buffer)).unwrap();
-                        eprintln!("send data: {}", size);
-                        total += size as u32;
-                    }
                     true => {
                         let brk_msg = "{\"command\": \"recog-break\"}".to_owned();
                         tx_sink.send(OwnedMessage::Text(brk_msg)).unwrap();
                         eprintln!("send break");
                         break 'txloop;
+                    }
+                    false => {
+                        let size = buffer.len();
+                        tx_sink.send(OwnedMessage::Binary(buffer)).unwrap();
+                        eprintln!("send data: {}", size);
+                        total += size as u32;
                     }
                 }
                 thread::sleep(Duration::from_millis(100));
@@ -79,7 +84,7 @@ impl MimiIO {
                             OwnedMessage::Close(e) => Some(OwnedMessage::Close(e)),
                             OwnedMessage::Text(t) => {
                                 let finished = false;
-                                rx_func(&t, &finished);
+                                rx_func(&t, finished);
                                 None
                             }
                             _ => None,

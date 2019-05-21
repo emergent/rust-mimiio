@@ -50,26 +50,21 @@ fn run() -> Result<(), String> {
 
     let mut f = File::open(input_file).expect("file open error");
     let mut buf = [0u8; CHUNK_SIZE];
-    let mut total = 0;
 
     let mio = MimiIO::open(
         "service.mimi.fd.ai",
         443,
         &headers,
-        &mut Box::new(move |send_buf: &mut Vec<u8>, recog_break: &mut bool| {
+        move |buffer, recog_break| {
             let size = f.read(&mut buf).unwrap();
             match size {
                 0 => *recog_break = true,
-                _ => {
-                    for &d in buf.iter() {
-                        send_buf.push(d);
-                    }
-                }
+                _ => buf.iter().for_each(|&a| buffer.push(a)),
             }
-        }),
-        &mut Box::new(move |recv_str, _finished| {
+        },
+        move |recv_str, _| {
             println!("{}", recv_str);
-        }),
+        },
     )?;
 
     mio.close();
