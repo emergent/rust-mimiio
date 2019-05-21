@@ -3,63 +3,65 @@ use futures::sink::Sink;
 use futures::stream::Stream;
 use futures::sync::mpsc;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::prelude::*;
 use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
+
 use websocket::header::Headers;
 use websocket::result::WebSocketError;
 use websocket::{ClientBuilder, OwnedMessage};
+
+use std::thread::JoinHandle;
 
 pub struct MimiIO {
     tx_thread: JoinHandle<u32>,
     rx_thread: JoinHandle<u32>,
 }
 
-const CHUNK_SIZE: usize = 16384;
-
 impl MimiIO {
-    pub fn open(
+    pub fn open<TXCB, RXCB>(
         host: &str,
         port: i32,
         request_headers: &HashMap<&str, &str>,
-    ) -> Result<Self, String> {
+        tx_func0: TXCB,
+        rx_func0: RXCB,
+    ) -> Result<Self, String>
+    where
+        TXCB: FnMut(&mut Vec<u8>, &mut bool) + Send + Sync + 'static,
+        RXCB: FnMut(&str, bool) + Send + Sync + 'static,
+    {
         let headers = Self::make_headers(request_headers);
         let url = format!("wss://{}:{}", host, port);
+
+        let mut tx_func = Box::new(tx_func0);
+        let mut rx_func = Box::new(rx_func0);
 
         let (tx_sender, tx_receiver) = mpsc::channel(0);
 
         let tx_thread = thread::spawn(move || {
             let mut tx_sink = tx_sender.wait();
-
-            let filename = "./audio.raw";
-            let mut f = File::open(filename).expect("file open error");
-            let mut buf = [0u8; CHUNK_SIZE];
+            let mut recog_break = false;
             let mut total = 0;
 
             'txloop: loop {
-                let size = f.read(&mut buf).unwrap();
+                let mut buffer = Vec::new();
+                tx_func(&mut buffer, &mut recog_break);
+                //let mut buffer = tx_func();
+                //let size = buffer.len();
 
-                match size {
-                    0 => {
-                        let recog_break =
-                            OwnedMessage::Text("{\"command\": \"recog-break\"}".to_owned());
-                        tx_sink.send(recog_break).unwrap();
+                match recog_break {
+                    true => {
+                        let brk_msg = "{\"command\": \"recog-break\"}".to_owned();
+                        tx_sink.send(OwnedMessage::Text(brk_msg)).unwrap();
                         eprintln!("send break");
                         break 'txloop;
                     }
-                    _ => {
-                        let bufv = buf.iter().take(size).map(|&b| b).collect::<Vec<u8>>();
-                        let data = OwnedMessage::Binary(bufv);
-
-                        tx_sink.send(data).unwrap();
+                    false => {
+                        let size = buffer.len();
+                        tx_sink.send(OwnedMessage::Binary(buffer)).unwrap();
                         eprintln!("send data: {}", size);
+                        total += size as u32;
                     }
                 }
-
-                total += size as u32;
-
                 thread::sleep(Duration::from_millis(100));
             }
             total
@@ -78,17 +80,14 @@ impl MimiIO {
                     let (sink, stream) = duplex.split();
                     eprintln!("recv wait start");
                     stream
-                        .filter_map(|message| {
-                            //eprintln!("{:?}", message);
-
-                            match message {
-                                OwnedMessage::Close(e) => Some(OwnedMessage::Close(e)),
-                                OwnedMessage::Text(t) => {
-                                    println!("{}", t);
-                                    None
-                                }
-                                _ => None,
+                        .filter_map(|message| match message {
+                            OwnedMessage::Close(e) => Some(OwnedMessage::Close(e)),
+                            OwnedMessage::Text(t) => {
+                                let finished = false;
+                                rx_func(&t, finished);
+                                None
                             }
+                            _ => None,
                         })
                         .select(tx_receiver.map_err(|_| WebSocketError::NoDataAvailable))
                         .forward(sink)
@@ -104,8 +103,7 @@ impl MimiIO {
     }
 
     pub fn close(self) {
-        let total = self.tx_thread.join().unwrap();
-        eprintln!("total sent bytes: {}", total);
+        self.tx_thread.join().unwrap();
         self.rx_thread.join().unwrap();
     }
 

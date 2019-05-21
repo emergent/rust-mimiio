@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 
+const CHUNK_SIZE: usize = 8192;
+
 fn read_token(filename: &str) -> Result<String, String> {
     let mut s = String::new();
     File::open(filename)
@@ -34,7 +36,7 @@ fn run() -> Result<(), String> {
         )
         .get_matches();
 
-    let _input_file = matches.value_of("input").unwrap();
+    let input_file = matches.value_of("input").unwrap();
 
     let token_filename = matches.value_of("token").unwrap();
     let token = read_token(token_filename)?;
@@ -46,7 +48,24 @@ fn run() -> Result<(), String> {
     headers.insert("Content-Type", "audio/x-pcm;bit=16;rate=16000;channels=1");
     headers.insert("Authorization", &token_format);
 
-    let mio = MimiIO::open("service.mimi.fd.ai", 443, &headers)?;
+    let mut f = File::open(input_file).expect("file open error");
+    let mut buf = [0u8; CHUNK_SIZE];
+
+    let mio = MimiIO::open(
+        "service.mimi.fd.ai",
+        443,
+        &headers,
+        move |buffer, recog_break| {
+            let size = f.read(&mut buf).unwrap();
+            match size {
+                0 => *recog_break = true,
+                _ => buf.iter().for_each(|&a| buffer.push(a)),
+            }
+        },
+        move |recv_str, _| {
+            println!("{}", recv_str);
+        },
+    )?;
 
     mio.close();
     Ok(())
