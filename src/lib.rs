@@ -1,16 +1,23 @@
-use futures::future::Future;
-use futures::sink::Sink;
-use futures::stream::Stream;
-use futures::sync::mpsc;
+/*
+//use futures::channel::mpsc;
+//use futures::future::{Future, FutureExt};
+//use futures::sink::Sink;
+//use futures::stream::Stream;
+use futures_util::stream::StreamExt;
 use std::collections::HashMap;
-use std::thread;
-use std::time::Duration;
+use tokio::time::Duration;
 
-use websocket::header::Headers;
-use websocket::result::WebSocketError;
-use websocket::{ClientBuilder, OwnedMessage};
-
-use std::thread::JoinHandle;
+use anyhow::Context;
+//use futures::StreamExt;
+use http::Request;
+use std::net::ToSocketAddrs;
+//use tokio::io::{ErrorKind, Sink, Split};
+//use tokio::stream::StreamExt;
+//use tokio::stream::StreamExt;
+//use futures_util::TryStreamExt;
+use tokio::task::JoinHandle;
+use tokio_tungstenite::client_async_tls;
+use tokio_tungstenite::tungstenite::Message;
 
 pub struct MimiIO {
     tx_thread: JoinHandle<u32>,
@@ -18,81 +25,94 @@ pub struct MimiIO {
 }
 
 impl MimiIO {
-    pub fn open<TXCB, RXCB>(
+    pub async fn open<TXCB, RXCB>(
         host: &str,
         port: i32,
         request_headers: &HashMap<&str, &str>,
         tx_func0: TXCB,
         rx_func0: RXCB,
-    ) -> Result<Self, String>
+    ) -> anyhow::Result<Self>
     where
         TXCB: FnMut(&mut Vec<u8>, &mut bool) + Send + Sync + 'static,
         RXCB: FnMut(&str, bool) + Send + Sync + 'static,
     {
-        let headers = Self::make_headers(request_headers);
+        //let headers = Self::make_headers(request_headers);
         let url = format!("wss://{}:{}", host, port);
 
         let mut tx_func = Box::new(tx_func0);
         let mut rx_func = Box::new(rx_func0);
 
-        let (tx_sender, tx_receiver) = mpsc::channel(0);
+        let mut builder = Request::builder().uri(url);
+        for (&k, &v) in request_headers {
+            builder = builder.header(k, v);
+        }
+        let req = builder.body(())?;
 
-        let tx_thread = thread::spawn(move || {
-            let mut tx_sink = tx_sender.wait();
+        let mut addrs = format!("{}:{}", host, port).to_socket_addrs().unwrap();
+        let addr = addrs.next().unwrap();
+        let con = tokio::net::TcpStream::connect(addr).await?;
+        let (ws_stream, a) = client_async_tls(req, con).await.context("hoge?")?;
+        let (sink, stream) = ws_stream.split();
+        let (tx_sender, tx_receiver) = futures_channel::mpsc::unbounded();
+
+        println!("{:?}", a);
+
+        let tx_thread = tokio::spawn(async move {
             let mut recog_break = false;
             let mut total = 0;
 
             'txloop: loop {
                 let mut buffer = Vec::new();
                 tx_func(&mut buffer, &mut recog_break);
-                //let mut buffer = tx_func();
-                //let size = buffer.len();
 
                 match recog_break {
                     true => {
-                        let brk_msg = "{\"command\": \"recog-break\"}".to_owned();
-                        tx_sink.send(OwnedMessage::Text(brk_msg)).unwrap();
+                        let brk_msg = "{\"command\": \"recog-break\"}";
+                        tx_sender
+                            .unbounded_send(Message::Text(brk_msg.into()))
+                            .await
+                            .unwrap();
                         eprintln!("send break");
                         break 'txloop;
                     }
                     false => {
                         let size = buffer.len();
-                        tx_sink.send(OwnedMessage::Binary(buffer)).unwrap();
+                        tx_sender
+                            .unbounded_send(Message::Binary(buffer))
+                            .await
+                            .unwrap();
                         eprintln!("send data: {}", size);
                         total += size as u32;
                     }
                 }
-                thread::sleep(Duration::from_millis(100));
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
             total
         });
 
-        let rx_thread = thread::spawn(move || {
-            let mut runtime = tokio::runtime::current_thread::Builder::new()
-                .build()
-                .unwrap();
+        let rx_thread = tokio::spawn(async move {
+            eprintln!("recv wait start");
 
-            let runner = ClientBuilder::new(&url)
-                .unwrap()
-                .custom_headers(&headers)
-                .async_connect_secure(None)
-                .and_then(|(duplex, _)| {
-                    let (sink, stream) = duplex.split();
-                    eprintln!("recv wait start");
-                    stream
-                        .filter_map(|message| match message {
-                            OwnedMessage::Close(e) => Some(OwnedMessage::Close(e)),
-                            OwnedMessage::Text(t) => {
-                                let finished = false;
-                                rx_func(&t, finished);
-                                None
-                            }
-                            _ => None,
-                        })
-                        .select(tx_receiver.map_err(|_| WebSocketError::NoDataAvailable))
-                        .forward(sink)
-                });
-            runtime.block_on(runner).unwrap();
+            stream
+                .filter_map(|message| futures_util::future::ready(None))
+                // .filter_map(|message| match message.unwrap() {
+                //     Message::Close(_) => futures_util::future::ok(()),
+                //     Message::Text(t) => {
+                //         let finished = false;
+                //         rx_func(&t, finished);
+                //         futures_util::future::ok(())
+                //     }
+                //     _ => futures_util::future::ok(()),
+                // })
+                .select_next_some(tx_receiver)
+                // .select(tx_receiver.map_err(|_| {
+                //     tokio_tungstenite::tungstenite::error::Error::Io(std::io::Error::from(
+                //         std::io::ErrorKind::BrokenPipe,
+                //     ))
+                // }))
+                .forward(sink)
+                .await
+                .unwrap();
             0
         });
 
@@ -102,17 +122,18 @@ impl MimiIO {
         })
     }
 
-    pub fn close(self) {
-        self.tx_thread.join().unwrap();
-        self.rx_thread.join().unwrap();
+    pub async fn close(self) {
+        self.tx_thread.await.unwrap();
+        self.rx_thread.await.unwrap();
     }
 
-    fn make_headers(headers: &HashMap<&str, &str>) -> Headers {
-        let mut ws_headers = Headers::new();
-
-        for (&key, &val) in headers.iter() {
-            ws_headers.set_raw(key.to_owned(), vec![val.as_bytes().to_vec()]);
-        }
-        ws_headers
-    }
+    // fn make_headers(headers: &HashMap<&str, &str>) -> Headers {
+    //     let mut ws_headers = Headers::new();
+    //
+    //     for (&key, &val) in headers.iter() {
+    //         ws_headers.set_raw(key.to_owned(), vec![val.as_bytes().to_vec()]);
+    //     }
+    //     ws_headers
+    // }
 }
+*/
