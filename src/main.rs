@@ -7,7 +7,7 @@ use structopt::StructOpt;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use futures_util::{future, pin_mut, FutureExt, StreamExt};
+use futures_util::{future, pin_mut, StreamExt};
 use std::net::ToSocketAddrs;
 use tokio::time::Duration;
 use tokio_tungstenite::client_async_tls;
@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let req = builder.body(())?;
 
-    let mut addrs = format!("{}:{}", host, port).to_socket_addrs().unwrap();
+    let mut addrs = format!("{}:{}", host, port).to_socket_addrs()?;
     let addr = addrs.next().context("addr not found")?;
     let con = tokio::net::TcpStream::connect(addr).await?;
     let (ws_stream, resp) = client_async_tls(req, con).await.context("hoge?")?;
@@ -78,7 +78,6 @@ async fn main() -> anyhow::Result<()> {
                     let mut data = m.into_data();
                     data.push('\n' as u8);
                     tokio::io::stdout().write_all(&data).await.unwrap();
-                    //println!();
                 }
                 Err(e) => {
                     println!("received close frame");
@@ -94,31 +93,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn read_file(tx: futures_channel::mpsc::UnboundedSender<Message>, input_file: PathBuf) {
-    let mut f = File::open(input_file)
-        .await
-        .context("file open error")
-        .unwrap();
+async fn read_file(
+    tx: futures_channel::mpsc::UnboundedSender<Message>,
+    input_file: PathBuf,
+) -> anyhow::Result<()> {
+    let mut f = File::open(input_file).await.context("file open error")?;
 
     loop {
         let mut buf = vec![0u8; CHUNK_SIZE];
-        let size = f.read(&mut buf).await.unwrap();
+        let size = f.read(&mut buf).await?;
 
         match size {
             0 => {
                 let brk_msg = "{\"command\": \"recog-break\"}";
-                tx.unbounded_send(Message::text(brk_msg)).unwrap();
+                tx.unbounded_send(Message::text(brk_msg))?;
                 println!("send break");
                 break;
             }
             n => {
                 buf.truncate(n);
-                tx.unbounded_send(Message::binary(buf)).unwrap();
+                tx.unbounded_send(Message::binary(buf))?;
                 println!("send data: {}", n);
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
-
-    //tx.unbounded_send(Message::Close(None)).unwrap(); // ここのコメントを外すと、break直後にCloseフレームを投げるので失敗する
+    Ok(())
 }
