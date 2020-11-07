@@ -1,13 +1,14 @@
 //use rust_mimiio::MimiIO;
 use anyhow::Context;
 use std::collections::HashMap;
+use std::env;
 
 use std::path::PathBuf;
 use structopt::StructOpt;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use futures_util::{future, pin_mut, StreamExt};
+use futures_util::{future, pin_mut, FutureExt, StreamExt};
 use std::net::ToSocketAddrs;
 use tokio::time::Duration;
 use tokio_tungstenite::client_async_tls;
@@ -35,6 +36,9 @@ async fn read_token(filename: PathBuf) -> anyhow::Result<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env::set_var("RUST_LOG", "debug");
+    env_logger::init();
+
     let opt = Opt::from_args();
     println!("{:#?}", opt);
 
@@ -49,8 +53,12 @@ async fn main() -> anyhow::Result<()> {
     headers.insert("Content-Type", "audio/x-pcm;bit=16;rate=16000;channels=1");
     headers.insert("Authorization", &token_format);
 
+    // 標準入力を受け取るためのStream
     let (tx_sender, tx_receiver) = futures_channel::mpsc::unbounded();
-    tokio::spawn(read_file(tx_sender, input_file));
+    // `sink`のdrop時に`close`してしまわないようにするための終了通知チャンネル
+    let (sig_sender, sig_receiver) = futures_channel::oneshot::channel::<bool>();
+
+    tokio::spawn(read_file(tx_sender, input_file, sig_receiver));
 
     let host = "dev-service.mimi.fd.ai";
     let port: i32 = 443;
@@ -72,19 +80,25 @@ async fn main() -> anyhow::Result<()> {
 
     let file_to_ws = tx_receiver.map(Ok).forward(sink);
     let ws_to_stdout = {
-        stream.for_each(|message| async {
-            match message {
-                Ok(m) => {
-                    let mut data = m.into_data();
-                    data.push('\n' as u8);
-                    tokio::io::stdout().write_all(&data).await.unwrap();
+        stream
+            .for_each(|message| async {
+                match message {
+                    Ok(m) => {
+                        let mut data = m.into_data();
+                        data.push('\n' as u8);
+                        tokio::io::stdout().write_all(&data).await.unwrap();
+                    }
+                    Err(e) => {
+                        println!("received close frame");
+                        println!("{}", e.to_string());
+                    }
                 }
-                Err(e) => {
-                    println!("received close frame");
-                    println!("{}", e.to_string());
-                }
-            }
-        })
+            })
+            .then(|_| async {
+                // `tungstenite` のSinkがDrop時に`close`しないようになればここは削除する
+                sig_sender.send(true).unwrap();
+                future::ready(())
+            })
     };
 
     pin_mut!(file_to_ws, ws_to_stdout);
@@ -96,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
 async fn read_file(
     tx: futures_channel::mpsc::UnboundedSender<Message>,
     input_file: PathBuf,
+    sig: futures_channel::oneshot::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut f = File::open(input_file).await.context("file open error")?;
 
@@ -114,9 +129,12 @@ async fn read_file(
                 buf.truncate(n);
                 tx.unbounded_send(Message::binary(buf))?;
                 println!("send data: {}", n);
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
     }
+
+    let _ = sig.await?;
+
     Ok(())
 }
