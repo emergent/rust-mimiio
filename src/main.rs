@@ -15,6 +15,8 @@ use tokio_tungstenite::client_async_tls;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::Message;
 
+use log::*;
+
 const CHUNK_SIZE: usize = 8192;
 
 #[derive(StructOpt, Debug)]
@@ -40,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let opt = Opt::from_args();
-    println!("{:#?}", opt);
+    info!("{:#?}", opt);
 
     let input_file = opt.input;
     let token_file = opt.token;
@@ -74,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = addrs.next().context("addr not found")?;
     let con = tokio::net::TcpStream::connect(addr).await?;
     let (ws_stream, resp) = client_async_tls(req, con).await.context("hoge?")?;
-    println!("{:?}", resp);
+    debug!("{:?}", resp);
 
     let (sink, stream) = ws_stream.split();
 
@@ -89,8 +91,8 @@ async fn main() -> anyhow::Result<()> {
                         tokio::io::stdout().write_all(&data).await.unwrap();
                     }
                     Err(e) => {
-                        println!("received close frame");
-                        println!("{}", e.to_string());
+                        debug!("received close frame");
+                        trace!("{}", e.to_string());
                     }
                 }
             })
@@ -122,13 +124,13 @@ async fn read_file(
             0 => {
                 let brk_msg = "{\"command\": \"recog-break\"}";
                 tx.unbounded_send(Message::text(brk_msg))?;
-                println!("send break");
+                debug!("send break");
                 break;
             }
             n => {
                 buf.truncate(n);
                 tx.unbounded_send(Message::binary(buf))?;
-                println!("send data: {}", n);
+                debug!("send data: {}", n);
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
