@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(read_file(tx_sender, input_file, sig_receiver));
 
-    let host = "dev-service.mimi.fd.ai";
+    let host = "service.mimi.fd.ai";
     let port: i32 = 443;
     let url = format!("wss://{}:{}", host, port);
 
