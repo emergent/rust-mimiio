@@ -1,13 +1,19 @@
 [package]
 name = "rust-mimiio"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["emergent <yosikawa@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-clap = "2.33.0"
-futures = "0.1.27"
-tokio = "0.1.20"
-websocket = "0.22.4"
-
-
+tokio = {version="1.0", features=["full"]}
+#tokio-tungstenite = { git="https://github.com/snapview/tokio-tungstenite.git" , features=["tls"]}
+#tokio-tungstenite = { path="../tokio-tungstenite" , features=["tls"]}
+anyhow = "1.0.33"
+structopt = "0.3.20"
+futures = "0.3.7"
+http = "0.2.1"
+futures-util = "0.3.8"
+futures-channel = "0.3.8"
+env_logger = "0.8.2"
+log = "0.4.13"
+tokio-tungstenite = "0.13.0"

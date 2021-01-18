@@ -1,46 +1,67 @@
-extern crate rust_mimiio;
-use clap::{App, Arg};
-use rust_mimiio::MimiIO;
+//use rust_mimiio::MimiIO;
+use anyhow::Context;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::prelude::*;
+use std::env;
+
+use std::path::PathBuf;
+use structopt::StructOpt;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+
+use futures_util::{future, pin_mut, FutureExt, StreamExt};
+use std::net::ToSocketAddrs;
+use tokio::time::Duration;
+use tokio_tungstenite::client_async_tls;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::Message;
+
+use log::*;
 
 const CHUNK_SIZE: usize = 8192;
 
-fn read_token(filename: &str) -> Result<String, String> {
-    let mut s = String::new();
-    File::open(filename)
-        .map_err(|e| e.to_string())?
-        .read_to_string(&mut s)
-        .map_err(|e| e.to_string())?;
+#[derive(StructOpt, Debug)]
+#[structopt(name = "basic")]
+struct Opt {
+    #[structopt(short, long, parse(from_os_str))]
+    token: PathBuf,
 
-    Ok(s.trim().to_string())
+    #[structopt(short, long, parse(from_os_str))]
+    input: PathBuf,
+
+    #[structopt(short, long)]
+    host: String,
+
+    #[structopt(short, long)]
+    port: u32,
+
+    #[structopt(long)]
+    tls: bool,
 }
 
-fn run() -> Result<(), String> {
-    let matches = App::new("rust-mimiio")
-        .version("0.1.0")
-        .arg(
-            Arg::with_name("token")
-                .required(true)
-                .short("t")
-                .long("token")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("input")
-                .required(true)
-                .short("i")
-                .long("input")
-                .takes_value(true),
-        )
-        .get_matches();
+async fn read_token(filename: PathBuf) -> anyhow::Result<String> {
+    tokio::fs::read_to_string(filename)
+        .await
+        .context("couldn't read file")
+        .map(|s| s.trim().to_string())
+}
 
-    let input_file = matches.value_of("input").unwrap();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    env::set_var("RUST_LOG", "debug");
+    env_logger::init();
 
-    let token_filename = matches.value_of("token").unwrap();
-    let token = read_token(token_filename)?;
+    let opt = Opt::from_args();
+    info!("{:#?}", opt);
+
+    let input_file = opt.input;
+    let token = read_token(opt.token).await?;
     let token_format = format!("Bearer {}", token);
+
+    let url = if opt.tls {
+        format!("wss://{}:{}", opt.host, opt.port)
+    } else {
+        format!("ws://{}:{}", opt.host, opt.port)
+    };
 
     let mut headers = HashMap::new();
     headers.insert("x-mimi-process", "asr");
@@ -48,32 +69,84 @@ fn run() -> Result<(), String> {
     headers.insert("Content-Type", "audio/x-pcm;bit=16;rate=16000;channels=1");
     headers.insert("Authorization", &token_format);
 
-    let mut f = File::open(input_file).expect("file open error");
-    let mut buf = [0u8; CHUNK_SIZE];
+    // 標準入力を受け取るためのStream
+    let (tx_sender, tx_receiver) = futures_channel::mpsc::unbounded();
+    // `sink`のdrop時に`close`してしまわないようにするための終了通知チャンネル
+    let (sig_sender, sig_receiver) = futures_channel::oneshot::channel::<bool>();
 
-    let mio = MimiIO::open(
-        "service.mimi.fd.ai",
-        443,
-        &headers,
-        move |buffer, recog_break| {
-            let size = f.read(&mut buf).unwrap();
-            match size {
-                0 => *recog_break = true,
-                _ => buf.iter().for_each(|&a| buffer.push(a)),
-            }
-        },
-        move |recv_str, _| {
-            println!("{}", recv_str);
-        },
-    )?;
+    tokio::spawn(read_file(tx_sender, input_file, sig_receiver));
 
-    mio.close();
+    let mut builder = Request::builder().uri(url);
+    for (k, v) in headers {
+        builder = builder.header(k, v);
+    }
+    let req = builder.body(())?;
+
+    let mut addrs = format!("{}:{}", opt.host, opt.port).to_socket_addrs()?;
+    let addr = addrs.next().context("addr not found")?;
+    let con = tokio::net::TcpStream::connect(addr).await?;
+    let (ws_stream, resp) = client_async_tls(req, con).await.context("hoge?")?;
+    trace!("{:?}", resp);
+
+    let (sink, stream) = ws_stream.split();
+
+    let file_to_ws = tx_receiver.map(Ok).forward(sink);
+    let ws_to_stdout = {
+        stream
+            .for_each(|message| async {
+                match message {
+                    Ok(m) => {
+                        if m.is_text() {
+                            info!("{}", m);
+                        }
+                    }
+                    Err(e) => {
+                        debug!("received close frame");
+                        trace!("{}", e.to_string());
+                    }
+                }
+            })
+            .then(|_| async {
+                sig_sender.send(true).unwrap();
+                future::ready(())
+            })
+    };
+
+    pin_mut!(file_to_ws, ws_to_stdout);
+    let (_, _) = future::join(file_to_ws, ws_to_stdout).await;
+
     Ok(())
 }
 
-fn main() {
-    match run() {
-        Err(e) => eprintln!("{}", e),
-        _ => {}
+async fn read_file(
+    tx: futures_channel::mpsc::UnboundedSender<Message>,
+    input_file: PathBuf,
+    sig: futures_channel::oneshot::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut f = File::open(input_file).await.context("file open error")?;
+
+    loop {
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        let size = f.read(&mut buf).await?;
+
+        match size {
+            0 => {
+                let brk_msg = "{\"command\": \"recog-break\"}";
+                tx.unbounded_send(Message::text(brk_msg))?;
+                debug!("send break");
+                break;
+            }
+            n => {
+                buf.truncate(n);
+                tx.unbounded_send(Message::binary(buf))?;
+                trace!("send data: {}", n);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
     }
+
+    let _ = sig.await?;
+    info!("signal received");
+
+    Ok(())
 }
