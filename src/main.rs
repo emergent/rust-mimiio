@@ -22,18 +22,27 @@ const CHUNK_SIZE: usize = 8192;
 #[derive(StructOpt, Debug)]
 #[structopt(name = "basic")]
 struct Opt {
+    /// access token file
     #[structopt(short, long, parse(from_os_str))]
     token: PathBuf,
 
+    /// input audio file
     #[structopt(short, long, parse(from_os_str))]
     input: PathBuf,
 
+    /// specify mimi ASR engine (asr, nict-asr, google-asr)
+    #[structopt(short = "x", long, default_value = "asr")]
+    process: String,
+
+    /// host name or IP address
     #[structopt(short, long)]
     host: String,
 
+    /// port number
     #[structopt(short, long)]
     port: u32,
 
+    /// use TLS
     #[structopt(long)]
     tls: bool,
 }
@@ -47,7 +56,7 @@ async fn read_token(filename: PathBuf) -> anyhow::Result<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env::set_var("RUST_LOG", "debug");
+    env::set_var("RUST_LOG", "info,rust-mimiio=debug");
     env_logger::init();
 
     let opt = Opt::from_args();
@@ -56,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let input_file = opt.input;
     let token = read_token(opt.token).await?;
     let token_format = format!("Bearer {}", token);
+    let process: &str = &opt.process;
 
     let url = if opt.tls {
         format!("wss://{}:{}", opt.host, opt.port)
@@ -63,8 +73,8 @@ async fn main() -> anyhow::Result<()> {
         format!("ws://{}:{}", opt.host, opt.port)
     };
 
-    let mut headers = HashMap::new();
-    headers.insert("x-mimi-process", "asr");
+    let mut headers: HashMap<&str, &str> = HashMap::new();
+    headers.insert("x-mimi-process", process);
     headers.insert("x-mimi-input-language", "ja");
     headers.insert("Content-Type", "audio/x-pcm;bit=16;rate=16000;channels=1");
     headers.insert("Authorization", &token_format);
@@ -146,7 +156,7 @@ async fn read_file(
     }
 
     let _ = sig.await?;
-    info!("signal received");
+    debug!("signal received");
 
     Ok(())
 }
