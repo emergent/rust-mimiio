@@ -6,7 +6,7 @@ use std::env;
 use std::path::PathBuf;
 use structopt::StructOpt;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 use futures_util::{future, pin_mut, FutureExt, StreamExt};
 use std::net::ToSocketAddrs;
@@ -27,6 +27,15 @@ struct Opt {
 
     #[structopt(short, long, parse(from_os_str))]
     input: PathBuf,
+
+    #[structopt(short, long)]
+    host: String,
+
+    #[structopt(short, long)]
+    port: u32,
+
+    #[structopt(long)]
+    tls: bool,
 }
 
 async fn read_token(filename: PathBuf) -> anyhow::Result<String> {
@@ -45,9 +54,14 @@ async fn main() -> anyhow::Result<()> {
     info!("{:#?}", opt);
 
     let input_file = opt.input;
-    let token_file = opt.token;
-    let token = read_token(token_file).await?;
+    let token = read_token(opt.token).await?;
     let token_format = format!("Bearer {}", token);
+
+    let url = if opt.tls {
+        format!("wss://{}:{}", opt.host, opt.port)
+    } else {
+        format!("ws://{}:{}", opt.host, opt.port)
+    };
 
     let mut headers = HashMap::new();
     headers.insert("x-mimi-process", "asr");
@@ -62,21 +76,17 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(read_file(tx_sender, input_file, sig_receiver));
 
-    let host = "service.mimi.fd.ai";
-    let port: i32 = 443;
-    let url = format!("wss://{}:{}", host, port);
-
     let mut builder = Request::builder().uri(url);
     for (k, v) in headers {
         builder = builder.header(k, v);
     }
     let req = builder.body(())?;
 
-    let mut addrs = format!("{}:{}", host, port).to_socket_addrs()?;
+    let mut addrs = format!("{}:{}", opt.host, opt.port).to_socket_addrs()?;
     let addr = addrs.next().context("addr not found")?;
     let con = tokio::net::TcpStream::connect(addr).await?;
     let (ws_stream, resp) = client_async_tls(req, con).await.context("hoge?")?;
-    debug!("{:?}", resp);
+    trace!("{:?}", resp);
 
     let (sink, stream) = ws_stream.split();
 
@@ -86,9 +96,9 @@ async fn main() -> anyhow::Result<()> {
             .for_each(|message| async {
                 match message {
                     Ok(m) => {
-                        let mut data = m.into_data();
-                        data.push('\n' as u8);
-                        tokio::io::stdout().write_all(&data).await.unwrap();
+                        if m.is_text() {
+                            info!("{}", m);
+                        }
                     }
                     Err(e) => {
                         debug!("received close frame");
@@ -97,7 +107,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             })
             .then(|_| async {
-                // `tungstenite` のSinkがDrop時に`close`しないようになればここは削除する
                 sig_sender.send(true).unwrap();
                 future::ready(())
             })
@@ -130,13 +139,14 @@ async fn read_file(
             n => {
                 buf.truncate(n);
                 tx.unbounded_send(Message::binary(buf))?;
-                debug!("send data: {}", n);
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                trace!("send data: {}", n);
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
     }
 
     let _ = sig.await?;
+    info!("signal received");
 
     Ok(())
 }
