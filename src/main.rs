@@ -30,9 +30,13 @@ struct Opt {
     #[structopt(short, long, parse(from_os_str))]
     input: PathBuf,
 
-    /// specify mimi ASR engine (asr, nict-asr, google-asr)
+    /// specify mimi ASR's engine (asr, nict-asr, google-asr)
     #[structopt(short = "x", long, default_value = "asr")]
     process: String,
+
+    /// specify mimi ASR's input language (ja, en, ...)
+    #[structopt(short, long, default_value = "ja")]
+    language: String,
 
     /// host name or IP address
     #[structopt(short, long)]
@@ -66,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
     let token = read_token(opt.token).await?;
     let token_format = format!("Bearer {}", token);
     let process: &str = &opt.process;
+    let lang: &str = &opt.language;
 
     let url = if opt.tls {
         format!("wss://{}:{}", opt.host, opt.port)
@@ -75,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut headers: HashMap<&str, &str> = HashMap::new();
     headers.insert("x-mimi-process", process);
-    headers.insert("x-mimi-input-language", "ja");
+    headers.insert("x-mimi-input-language", lang);
     headers.insert("Content-Type", "audio/x-pcm;bit=16;rate=16000;channels=1");
     headers.insert("Authorization", &token_format);
 
