@@ -106,26 +106,25 @@ async fn main() -> anyhow::Result<()> {
     let (sink, stream) = ws_stream.split();
 
     let file_to_ws = tx_receiver.map(Ok).forward(sink);
-    let ws_to_stdout = {
-        stream
-            .for_each(|message| async {
-                match message {
-                    Ok(m) => {
-                        if m.is_text() {
-                            info!("{}", m);
-                        }
-                    }
-                    Err(e) => {
-                        debug!("received close frame");
-                        trace!("{}", e.to_string());
+    let ws_to_stdout = stream
+        .for_each(|message| async {
+            match message {
+                Ok(m) => {
+                    if m.is_text() {
+                        info!("{}", m);
                     }
                 }
-            })
-            .then(|_| async {
-                sig_sender.send(true).unwrap();
-                future::ready(())
-            })
-    };
+                Err(e) => {
+                    debug!("received close frame");
+                    trace!("{}", e.to_string());
+                }
+            }
+        })
+        .then(|_| async {
+            sig_sender.send(true).unwrap();
+            future::ready(())
+        });
+    //};
 
     pin_mut!(file_to_ws, ws_to_stdout);
     let (_, _) = future::join(file_to_ws, ws_to_stdout).await;
