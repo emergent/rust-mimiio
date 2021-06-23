@@ -165,8 +165,8 @@ async fn read_file(
         let size = f.read(&mut buf).await?;
 
         if size > 0 && real {
+            // RealTime mode
             let ms = size as u64 / 32;
-            debug!("sleep {} ms", ms);
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
 
