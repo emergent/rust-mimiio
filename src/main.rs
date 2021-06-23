@@ -49,6 +49,18 @@ struct Opt {
     /// use TLS
     #[structopt(long)]
     tls: bool,
+
+    /// use RealTime mode
+    #[structopt(long)]
+    real: bool,
+
+    /// use partial result (available only when using nict-asr)
+    #[structopt(long)]
+    partial: bool,
+
+    /// use temporary result (available only when using nict-asr)
+    #[structopt(long)]
+    temp: bool,
 }
 
 async fn read_token(filename: PathBuf) -> anyhow::Result<String> {
@@ -60,7 +72,7 @@ async fn read_token(filename: PathBuf) -> anyhow::Result<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env::set_var("RUST_LOG", "info,rust-mimiio=debug");
+    env::set_var("RUST_LOG", "info,rust_mimiio=trace");
     env_logger::init();
 
     let opt = Opt::from_args();
@@ -84,12 +96,18 @@ async fn main() -> anyhow::Result<()> {
     headers.insert("Content-Type", "audio/x-pcm;bit=16;rate=16000;channels=1");
     headers.insert("Authorization", &token_format);
 
+    let asr_options = format!(
+        "response_format=v2;progressive={};temporary={}",
+        opt.partial, opt.temp
+    );
+    headers.insert("x-mimi-nict-asr-options", &asr_options);
+
     // 標準入力を受け取るためのStream
     let (tx_sender, tx_receiver) = futures_channel::mpsc::unbounded();
     // `sink`のdrop時に`close`してしまわないようにするための終了通知チャンネル
     let (sig_sender, sig_receiver) = futures_channel::oneshot::channel::<bool>();
 
-    tokio::spawn(read_file(tx_sender, input_file, sig_receiver));
+    tokio::spawn(read_file(tx_sender, input_file, opt.real, sig_receiver));
 
     let mut builder = Request::builder().uri(url);
     for (k, v) in headers {
@@ -111,11 +129,14 @@ async fn main() -> anyhow::Result<()> {
             match message {
                 Ok(m) => {
                     if m.is_text() {
-                        info!("{}", m);
+                        info!("text frame: {}", m);
+                    } else if m.is_close() {
+                        info!("close frame: {:?}", m);
+                    } else {
+                        info!("the other frame: {:?}", m);
                     }
                 }
                 Err(e) => {
-                    debug!("received close frame");
                     trace!("{}", e.to_string());
                 }
             }
@@ -124,7 +145,6 @@ async fn main() -> anyhow::Result<()> {
             sig_sender.send(true).unwrap();
             future::ready(())
         });
-    //};
 
     pin_mut!(file_to_ws, ws_to_stdout);
     let (_, _) = future::join(file_to_ws, ws_to_stdout).await;
@@ -135,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
 async fn read_file(
     tx: futures_channel::mpsc::UnboundedSender<Message>,
     input_file: PathBuf,
+    real: bool,
     sig: futures_channel::oneshot::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut f = File::open(input_file).await.context("file open error")?;
@@ -142,6 +163,12 @@ async fn read_file(
     loop {
         let mut buf = vec![0u8; CHUNK_SIZE];
         let size = f.read(&mut buf).await?;
+
+        if size > 0 && real {
+            let ms = size as u64 / 32;
+            debug!("sleep {} ms", ms);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
 
         match size {
             0 => {
@@ -153,8 +180,7 @@ async fn read_file(
             n => {
                 buf.truncate(n);
                 tx.unbounded_send(Message::binary(buf))?;
-                trace!("send data: {}", n);
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                //trace!("send data: {}", n);
             }
         }
     }
