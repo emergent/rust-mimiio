@@ -54,9 +54,9 @@ struct Opt {
     #[structopt(long)]
     real: bool,
 
-    /// use partial result (available only when using nict-asr)
+    /// use progressive result (available only when using nict-asr)
     #[structopt(long)]
-    partial: bool,
+    progressive: bool,
 
     /// use temporary result (available only when using nict-asr)
     #[structopt(long)]
@@ -118,7 +118,9 @@ async fn main() -> anyhow::Result<()> {
     let mut addrs = format!("{}:{}", opt.host, opt.port).to_socket_addrs()?;
     let addr = addrs.next().context("addr not found")?;
     let con = tokio::net::TcpStream::connect(addr).await?;
-    let (ws_stream, resp) = client_async_tls(req, con).await.context("hoge?")?;
+    let (ws_stream, resp) = client_async_tls(req, con)
+        .await
+        .context("couldn't upgrade a WebSocket session.")?;
     trace!("{:?}", resp);
 
     let (sink, stream) = ws_stream.split();
@@ -180,13 +182,12 @@ async fn read_file(
             n => {
                 buf.truncate(n);
                 tx.unbounded_send(Message::binary(buf))?;
-                //trace!("send data: {}", n);
             }
         }
     }
 
     let _ = sig.await?;
-    debug!("signal received");
+    trace!("signal received");
 
     Ok(())
 }
