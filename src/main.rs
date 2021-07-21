@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
 
     let asr_options = format!(
         "response_format=v2;progressive={};temporary={}",
-        opt.partial, opt.temp
+        opt.progressive, opt.temp
     );
     headers.insert("x-mimi-nict-asr-options", &asr_options);
 
